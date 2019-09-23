@@ -19,6 +19,7 @@ package kafka.server
 
 import java.util.Properties
 
+import com.yammer.metrics.Metrics
 import kafka.log.LogConfig
 import kafka.message.ZStdCompressionCodec
 import kafka.utils.TestUtils
@@ -28,6 +29,7 @@ import org.apache.kafka.common.record._
 import org.apache.kafka.common.requests.{ProduceRequest, ProduceResponse}
 import org.junit.Assert._
 import org.junit.Test
+import org.scalatest.Assertions.fail
 
 import scala.collection.JavaConverters._
 
@@ -37,8 +39,10 @@ import scala.collection.JavaConverters._
   */
 class ProduceRequestTest extends BaseRequestTest {
 
+  val metricsKeySet = Metrics.defaultRegistry.allMetrics.keySet.asScala
+
   @Test
-  def testSimpleProduceRequest() {
+  def testSimpleProduceRequest(): Unit = {
     val (partition, leader) = createTopicAndFindPartitionWithLeader("topic")
 
     def sendAndCheck(memoryRecords: MemoryRecords, expectedOffset: Long): ProduceResponse.PartitionResponse = {
@@ -64,7 +68,7 @@ class ProduceRequestTest extends BaseRequestTest {
   }
 
   @Test
-  def testProduceToNonReplica() {
+  def testProduceToNonReplica(): Unit = {
     val topic = "topic"
     val partition = 0
 
@@ -95,7 +99,7 @@ class ProduceRequestTest extends BaseRequestTest {
   }
 
   @Test
-  def testCorruptLz4ProduceRequest() {
+  def testCorruptLz4ProduceRequest(): Unit = {
     val (partition, leader) = createTopicAndFindPartitionWithLeader("topic")
     val timestamp = 1000000
     val memoryRecords = MemoryRecords.withRecords(CompressionType.LZ4,
@@ -113,6 +117,8 @@ class ProduceRequestTest extends BaseRequestTest {
     assertEquals(Errors.CORRUPT_MESSAGE, partitionResponse.error)
     assertEquals(-1, partitionResponse.baseOffset)
     assertEquals(-1, partitionResponse.logAppendTime)
+    assertEquals(metricsKeySet.count(_.getMBeanName.endsWith(s"${BrokerTopicStats.InvalidMessageCrcRecordsPerSec}")), 1)
+    assertTrue(TestUtils.meterCount(s"${BrokerTopicStats.InvalidMessageCrcRecordsPerSec}") > 0)
   }
 
   @Test
@@ -133,11 +139,19 @@ class ProduceRequestTest extends BaseRequestTest {
     // produce request with v7: works fine!
     val res1 = sendProduceRequest(leader,
       new ProduceRequest.Builder(7, 7, -1, 3000, partitionRecords.asJava, null).build())
-    val (tp, partitionResponse) = res1.responses.asScala.head
-    assertEquals(topicPartition, tp)
-    assertEquals(Errors.NONE, partitionResponse.error)
-    assertEquals(0, partitionResponse.baseOffset)
-    assertEquals(-1, partitionResponse.logAppendTime)
+    val (tp1, partitionResponse1) = res1.responses.asScala.head
+    assertEquals(topicPartition, tp1)
+    assertEquals(Errors.NONE, partitionResponse1.error)
+    assertEquals(0, partitionResponse1.baseOffset)
+    assertEquals(-1, partitionResponse1.logAppendTime)
+
+    // produce request with v3: returns Errors.UNSUPPORTED_COMPRESSION_TYPE.
+    val res2 = sendProduceRequest(leader,
+      new ProduceRequest.Builder(3, 3, -1, 3000, partitionRecords.asJava, null)
+        .buildUnsafe(3))
+    val (tp2, partitionResponse2) = res2.responses.asScala.head
+    assertEquals(topicPartition, tp2)
+    assertEquals(Errors.UNSUPPORTED_COMPRESSION_TYPE, partitionResponse2.error)
   }
 
   private def sendProduceRequest(leaderId: Int, request: ProduceRequest): ProduceResponse = {

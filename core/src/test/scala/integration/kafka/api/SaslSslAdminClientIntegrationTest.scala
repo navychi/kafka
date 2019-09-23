@@ -16,11 +16,11 @@ import java.io.File
 import java.util
 
 import kafka.security.auth.{All, Allow, Alter, AlterConfigs, Authorizer, ClusterAction, Create, Delete, Deny, Describe, Group, Operation, PermissionType, SimpleAclAuthorizer, Topic, Acl => AuthAcl, Resource => AuthResource}
+import kafka.security.authorizer.AuthorizerWrapper
 import kafka.server.KafkaConfig
 import kafka.utils.{CoreUtils, JaasTestUtils, TestUtils}
 import kafka.utils.TestUtils._
-
-import org.apache.kafka.clients.admin.{AdminClient, CreateAclsOptions, DeleteAclsOptions}
+import org.apache.kafka.clients.admin._
 import org.apache.kafka.common.acl._
 import org.apache.kafka.common.errors.{ClusterAuthorizationException, InvalidRequestException}
 import org.apache.kafka.common.resource.{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType}
@@ -33,12 +33,13 @@ import scala.util.{Failure, Success, Try}
 
 class SaslSslAdminClientIntegrationTest extends AdminClientIntegrationTest with SaslSetup {
   this.serverConfig.setProperty(KafkaConfig.ZkEnableSecureAclsProp, "true")
+  // This tests the old SimpleAclAuthorizer, we have another test for the new AclAuthorizer
   this.serverConfig.setProperty(KafkaConfig.AuthorizerClassNameProp, classOf[SimpleAclAuthorizer].getName)
 
   override protected def securityProtocol = SecurityProtocol.SASL_SSL
   override protected lazy val trustStoreFile = Some(File.createTempFile("truststore", ".jks"))
 
-  override def configureSecurityBeforeServersStart() {
+  override def configureSecurityBeforeServersStart(): Unit = {
     val authorizer = CoreUtils.createObject[Authorizer](classOf[SimpleAclAuthorizer].getName)
     try {
       authorizer.configure(this.configs.head.originals())
@@ -60,8 +61,12 @@ class SaslSslAdminClientIntegrationTest extends AdminClientIntegrationTest with 
 
   @Before
   override def setUp(): Unit = {
-    startSasl(jaasSections(Seq("GSSAPI"), Some("GSSAPI"), Both, JaasTestUtils.KafkaServerContextName))
+    setUpSasl()
     super.setUp()
+  }
+
+  def setUpSasl(): Unit = {
+    startSasl(jaasSections(Seq("GSSAPI"), Some("GSSAPI"), Both, JaasTestUtils.KafkaServerContextName))
   }
 
   private def clusterAcl(permissionType: PermissionType, operation: Operation): AuthAcl = {
@@ -69,17 +74,17 @@ class SaslSslAdminClientIntegrationTest extends AdminClientIntegrationTest with 
       AuthAcl.WildCardHost, operation)
   }
 
-  private def addClusterAcl(permissionType: PermissionType, operation: Operation): Unit = {
+  def addClusterAcl(permissionType: PermissionType, operation: Operation): Unit = {
     val acls = Set(clusterAcl(permissionType, operation))
-    val authorizer = servers.head.apis.authorizer.get
+    val authorizer = simpleAclAuthorizer
     val prevAcls = authorizer.getAcls(AuthResource.ClusterResource)
     authorizer.addAcls(acls, AuthResource.ClusterResource)
     TestUtils.waitAndVerifyAcls(prevAcls ++ acls, authorizer, AuthResource.ClusterResource)
   }
 
-  private def removeClusterAcl(permissionType: PermissionType, operation: Operation): Unit = {
+  def removeClusterAcl(permissionType: PermissionType, operation: Operation): Unit = {
     val acls = Set(clusterAcl(permissionType, operation))
-    val authorizer = servers.head.apis.authorizer.get
+    val authorizer = simpleAclAuthorizer
     val prevAcls = authorizer.getAcls(AuthResource.ClusterResource)
     Assert.assertTrue(authorizer.removeAcls(acls, AuthResource.ClusterResource))
     TestUtils.waitAndVerifyAcls(prevAcls -- acls, authorizer, AuthResource.ClusterResource)
@@ -278,6 +283,11 @@ class SaslSslAdminClientIntegrationTest extends AdminClientIntegrationTest with 
     assertFutureExceptionTypeEquals(results.values.get(emptyResourceNameAcl), classOf[InvalidRequestException])
   }
 
+  override def configuredClusterPermissions(): Set[AclOperation] = {
+    Set(AclOperation.ALTER, AclOperation.CREATE, AclOperation.CLUSTER_ACTION, AclOperation.ALTER_CONFIGS,
+      AclOperation.DESCRIBE, AclOperation.DESCRIBE_CONFIGS)
+  }
+
   private def verifyCauseIsClusterAuth(e: Throwable): Unit = {
     if (!e.getCause.isInstanceOf[ClusterAuthorizationException]) {
       throw e.getCause
@@ -391,7 +401,7 @@ class SaslSslAdminClientIntegrationTest extends AdminClientIntegrationTest with 
     testAclCreateGetDelete(expectAuth = false)
   }
 
-  private def waitForDescribeAcls(client: AdminClient, filter: AclBindingFilter, acls: Set[AclBinding]): Unit = {
+  private def waitForDescribeAcls(client: Admin, filter: AclBindingFilter, acls: Set[AclBinding]): Unit = {
     var lastResults: util.Collection[AclBinding] = null
     TestUtils.waitUntilTrue(() => {
       lastResults = client.describeAcls(filter).values.get()
@@ -407,5 +417,10 @@ class SaslSslAdminClientIntegrationTest extends AdminClientIntegrationTest with 
 
   private def getAcls(allTopicAcls: AclBindingFilter) = {
     client.describeAcls(allTopicAcls).values.get().asScala.toSet
+  }
+
+  private def simpleAclAuthorizer: Authorizer = {
+    val authorizerWrapper = servers.head.dataPlaneRequestProcessor.authorizer.get.asInstanceOf[AuthorizerWrapper]
+    authorizerWrapper.baseAuthorizer
   }
 }

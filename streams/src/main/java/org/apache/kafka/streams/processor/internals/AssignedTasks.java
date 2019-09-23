@@ -77,15 +77,15 @@ abstract class AssignedTasks<T extends Task> {
                 }
                 it.remove();
             } catch (final LockException e) {
-                // made this trace as it will spam the logs in the poll loop.
-                log.trace("Could not create {} {} due to {}; will retry", taskTypeName, entry.getKey(), e.toString());
+                // If this is a permanent error, then we could spam the log since this is in the run loop. But, other related
+                // messages show up anyway. So keeping in debug for sake of faster discoverability of problem
+                log.debug("Could not create {} {} due to {}; will retry", taskTypeName, entry.getKey(), e.toString());
             }
         }
     }
 
     boolean allTasksRunning() {
-        return created.isEmpty()
-                && suspended.isEmpty();
+        return created.isEmpty() && suspended.isEmpty();
     }
 
     Collection<T> running() {
@@ -106,7 +106,7 @@ abstract class AssignedTasks<T extends Task> {
         return firstException.get();
     }
 
-    RuntimeException closeNonRunningTasks(final Collection<T> tasks) {
+    private RuntimeException closeNonRunningTasks(final Collection<T> tasks) {
         RuntimeException exception = null;
         for (final T task : tasks) {
             try {
@@ -167,7 +167,7 @@ abstract class AssignedTasks<T extends Task> {
     boolean maybeResumeSuspendedTask(final TaskId taskId, final Set<TopicPartition> partitions) {
         if (suspended.containsKey(taskId)) {
             final T task = suspended.get(taskId);
-            log.trace("found suspended {} {}", taskTypeName, taskId);
+            log.trace("Found suspended {} {}", taskTypeName, taskId);
             if (task.partitions().equals(partitions)) {
                 suspended.remove(taskId);
                 task.resume();
@@ -185,10 +185,10 @@ abstract class AssignedTasks<T extends Task> {
                     }
                     throw e;
                 }
-                log.trace("resuming suspended {} {}", taskTypeName, task.id());
+                log.trace("Resuming suspended {} {}", taskTypeName, task.id());
                 return true;
             } else {
-                log.warn("couldn't resume task {} assigned partitions {}, task partitions {}", taskId, partitions, task.partitions());
+                log.warn("Couldn't resume task {} assigned partitions {}, task partitions {}", taskId, partitions, task.partitions());
             }
         }
         return false;
@@ -198,8 +198,9 @@ abstract class AssignedTasks<T extends Task> {
      * @throws TaskMigratedException if the task producer got fenced (EOS only)
      */
     void transitionToRunning(final T task) {
-        log.debug("transitioning {} {} to running", taskTypeName, task.id());
+        log.debug("Transitioning {} {} to running", taskTypeName, task.id());
         running.put(task.id(), task);
+        task.initializeTaskTime();
         task.initializeTopology();
         for (final TopicPartition topicPartition : task.partitions()) {
             runningByPartition.put(topicPartition, task);
@@ -279,7 +280,6 @@ abstract class AssignedTasks<T extends Task> {
     int commit() {
         int committed = 0;
         RuntimeException firstException = null;
-
         for (final Iterator<T> it = running().iterator(); it.hasNext(); ) {
             final T task = it.next();
             try {
@@ -333,25 +333,27 @@ abstract class AssignedTasks<T extends Task> {
 
     void close(final boolean clean) {
         final AtomicReference<RuntimeException> firstException = new AtomicReference<>(null);
-        for (final T task : allTasks()) {
+
+        for (final T task: allTasks()) {
             try {
-                task.close(clean, false);
+                if (suspended.containsKey(task.id())) {
+                    task.closeSuspended(clean, false, null);
+                } else {
+                    task.close(clean, false);
+                }
             } catch (final TaskMigratedException e) {
                 log.info("Failed to close {} {} since it got migrated to another thread already. " +
-                        "Closing it as zombie and move on.", taskTypeName, task.id());
+                    "Closing it as zombie and move on.", taskTypeName, task.id());
                 firstException.compareAndSet(null, closeZombieTask(task));
             } catch (final RuntimeException t) {
                 log.error("Failed while closing {} {} due to the following error:",
-                          task.getClass().getSimpleName(),
-                          task.id(),
-                          t);
+                    task.getClass().getSimpleName(),
+                    task.id(),
+                    t);
                 if (clean) {
-                    if (!closeUnclean(task)) {
-                        firstException.compareAndSet(null, t);
-                    }
-                } else {
-                    firstException.compareAndSet(null, t);
+                    closeUnclean(task);
                 }
+                firstException.compareAndSet(null, t);
             }
         }
 

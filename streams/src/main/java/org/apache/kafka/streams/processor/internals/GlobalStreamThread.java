@@ -189,7 +189,11 @@ public class GlobalStreamThread extends Thread {
         this.topology = topology;
         this.globalConsumer = globalConsumer;
         this.stateDirectory = stateDirectory;
-        this.streamsMetrics = new StreamsMetricsImpl(metrics, threadClientId);
+        this.streamsMetrics = new StreamsMetricsImpl(
+            metrics,
+            threadClientId,
+            config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG)
+        );
         this.logPrefix = String.format("global-stream-thread [%s] ", threadClientId);
         this.logContext = new LogContext(logPrefix);
         this.log = logContext.logger(getClass());
@@ -258,7 +262,7 @@ public class GlobalStreamThread extends Thread {
             } catch (final RuntimeException e) {
                 // just log an error if the consumer throws an exception during close
                 // so we can always attempt to close the state stores.
-                log.error("Failed to close consumer due to the following error:", e);
+                log.error("Failed to close global consumer due to the following error:", e);
             }
 
             stateMaintainer.close();

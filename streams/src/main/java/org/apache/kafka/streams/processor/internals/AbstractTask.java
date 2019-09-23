@@ -34,9 +34,7 @@ import org.slf4j.Logger;
 
 import java.io.IOException;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
 
 public abstract class AbstractTask implements Task {
@@ -173,30 +171,6 @@ public abstract class AbstractTask implements Task {
         return sb.toString();
     }
 
-    protected Map<TopicPartition, Long> activeTaskCheckpointableOffsets() {
-        return Collections.emptyMap();
-    }
-
-    protected void updateOffsetLimits() {
-        for (final TopicPartition partition : partitions) {
-            try {
-                final OffsetAndMetadata metadata = consumer.committed(partition); // TODO: batch API?
-                final long offset = metadata != null ? metadata.offset() : 0L;
-                stateMgr.putOffsetLimit(partition, offset);
-
-                if (log.isTraceEnabled()) {
-                    log.trace("Updating store offset limits {} for changelog {}", offset, partition);
-                }
-            } catch (final AuthorizationException e) {
-                throw new ProcessorStateException(String.format("task [%s] AuthorizationException when initializing offsets for %s", id, partition), e);
-            } catch (final WakeupException e) {
-                throw e;
-            } catch (final KafkaException e) {
-                throw new ProcessorStateException(String.format("task [%s] Failed to initialize offsets for %s", id, partition), e);
-            }
-        }
-    }
-
     /**
      * Flush all state stores owned by this task
      */
@@ -225,9 +199,6 @@ public abstract class AbstractTask implements Task {
         }
         log.trace("Initializing state stores");
 
-        // set initial offset limits
-        updateOffsetLimits();
-
         for (final StateStore store : topology.stateStores()) {
             log.trace("Initializing store {}", store.name());
             processorContext.uninitialize();
@@ -240,15 +211,13 @@ public abstract class AbstractTask implements Task {
     }
 
     /**
-     * @param writeCheckpoint boolean indicating if a checkpoint file should be written
      * @throws ProcessorStateException if there is an error while closing the state manager
      */
-    // visible for testing
-    void closeStateManager(final boolean writeCheckpoint) throws ProcessorStateException {
+    void closeStateManager(final boolean clean) throws ProcessorStateException {
         ProcessorStateException exception = null;
         log.trace("Closing state manager");
         try {
-            stateMgr.close(writeCheckpoint ? activeTaskCheckpointableOffsets() : null);
+            stateMgr.close(clean);
         } catch (final ProcessorStateException e) {
             exception = e;
         } finally {
@@ -280,4 +249,18 @@ public abstract class AbstractTask implements Task {
     public Collection<TopicPartition> changelogPartitions() {
         return stateMgr.changelogPartitions();
     }
+
+    long committedOffsetForPartition(final TopicPartition partition) {
+        try {
+            final OffsetAndMetadata metadata = consumer.committed(partition);
+            return metadata != null ? metadata.offset() : 0L;
+        } catch (final AuthorizationException e) {
+            throw new ProcessorStateException(String.format("task [%s] AuthorizationException when initializing offsets for %s", id, partition), e);
+        } catch (final WakeupException e) {
+            throw e;
+        } catch (final KafkaException e) {
+            throw new ProcessorStateException(String.format("task [%s] Failed to initialize offsets for %s", id, partition), e);
+        }
+    }
+
 }
